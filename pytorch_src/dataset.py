@@ -54,7 +54,7 @@ def get_loaders(dataset,
     else:
         raise NotImplementedError
 
-    train_loader = DataLoader(train_indexed_dataset,
+    train_loader = DataLoader(train_dataset,
             batch_size=batch_size, shuffle=True, **kwargs)
 
     valid_loader = DataLoader(valid_dataset,
@@ -64,3 +64,30 @@ def get_loaders(dataset,
         batch_size=test_batch_size, shuffle=False, **kwargs)
 
     return train_loader, valid_loader, test_loader
+
+
+
+def get_train_test_loaders(dataset,
+    datadir,
+    batch_size,
+    test_batch_size,
+    kwargs):
+    
+    
+    if dataset == 'mnist':
+        train_dataset = datasets.MNIST(root=datadir, download=True, transform=transforms.Compose([
+                           transforms.ToTensor()
+                       ]))
+        test_dataset = datasets.MNIST(root=datadir, train=False, transform=transforms.Compose([
+                           transforms.ToTensor()
+                       ]))
+    else:
+        raise NotImplementedError
+
+    train_loader = DataLoader(train_dataset,
+            batch_size=batch_size, shuffle=True, **kwargs)
+
+    test_loader = DataLoader(test_dataset,
+        batch_size=test_batch_size, shuffle=False, **kwargs)
+
+    return train_loader, test_loader

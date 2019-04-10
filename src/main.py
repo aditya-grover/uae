@@ -1,148 +1,129 @@
-from __future__ import print_function
-import argparse
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
-import os, sys
-from networks import *
-from dataset import *
+import numpy as np 
+import tensorflow as tf 
+from utils import *
+from datasource import Datasource
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+from tensorflow.python.platform import flags
+FLAGS = flags.FLAGS
+
+# File options
+flags.DEFINE_string('datadir', '../datasets/', 'directory for datasets')
+flags.DEFINE_string('datasource', 'mnist', 'mnist/omniglot/mnist2omniglot/omniglot2mnist')
+flags.DEFINE_string('logdir', './models/', 'directory to save checkpoints, events files')
+flags.DEFINE_string('outdir', './results/', 'directory to save samples, final results')
+flags.DEFINE_bool('resume', False, 'resume training if there is a model available')
+flags.DEFINE_bool('train', True, 'True to train.')
+flags.DEFINE_bool('test', True, 'True to test.')
+flags.DEFINE_bool('is_discrete', False, 'True if dataset is discrete, false otherwise.')
+flags.DEFINE_string('ckpt', None, 'ckpt to load if resume is True. Defaults (None) to latest ckpt in logdir')
+flags.DEFINE_string('exp_id', '0', 'exp_id appended to logdir and outdir')
+flags.DEFINE_string('gpu_id', '0', 'gpu id options')
+flags.DEFINE_bool('dump', True, 'Dumps to log.txt if True')
+
+# Training options
+flags.DEFINE_integer('num_epochs', 500, 'number of training epochs')
+flags.DEFINE_integer('batch_size', 100, 'number of datapoints per batch')
+flags.DEFINE_float('lr', 0.001, 'learning rate for the model')
+flags.DEFINE_string('optimizer', 'adam', 'sgd, adam, momentum')
+flags.DEFINE_integer('log_interval', 500, 'training steps after which summary and checkpoints dumped')
+flags.DEFINE_integer('num_samples', 16, 'number of samples to generate')
+flags.DEFINE_bool('vae', False, 'uses vae loss if True')
+
+# Model options
+flags.DEFINE_string('model', 'uae', 'uae/convuae')
+flags.DEFINE_string('activation', 'relu', 'sigmoid/tanh/softplus/relu')
+flags.DEFINE_integer('seed', 0, 'random seed for initializing model parameters')
+flags.DEFINE_string('dec_arch', '500,500', 'comma-separated decoder architecture')
+flags.DEFINE_string('enc_arch', '', 'comma-separated encoder architecture')
+flags.DEFINE_integer('num_measurements', 10, 'number of measurements')
+flags.DEFINE_float('noise_std', 0, 'std. of noise')
+flags.DEFINE_float('reg_param', 0., 'regularization for encoder')
+flags.DEFINE_bool('learn_A', True, 'learns the measurement matrix if True')
+flags.DEFINE_string('A_file', './results/0/A.npy', 'file for precomputed measurement matrix')
+flags.DEFINE_bool('non_linear_act', False, 'nonlinear activation on final layer of encoder if True')
+
+flags.DEFINE_integer('transfer', 0, '0: no transfer, 1: transfer encoder 2: transfer decoder')
+flags.DEFINE_string('transfer_outdir', './results/', 'directory containing log.txt for source domain')
+flags.DEFINE_string('transfer_logdir', './models/', 'directory containing ckpts for source domain')
+flags.DEFINE_string('pkl_file', None, 'pkl file for reconstruction')
 
 
-def train(args, model, device, train_loader, optimizer, epoch, P):
-    model.train()
-    for batch_idx, (data, _) in enumerate(train_loader):
-        data = data.to(device)
-        optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
-        loss = loss_function(recon_batch, data, mu, logvar)
-        loss.backward()
-        train_loss += loss.item()
-        optimizer.step()
-        if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader),
-                loss.item() / len(data)))
+def process_flags():
+	"""
+	Processes easy-to-specify cmd line FLAGS to appropriate syntax
+	"""
+	FLAGS.optimizer = get_optimizer_fn(FLAGS.optimizer)
+	FLAGS.activation = get_activation_fn(FLAGS.activation)
+	
+	if FLAGS.dec_arch == '':
+		FLAGS.dec_arch = []
+	else:
+		FLAGS.dec_arch = list(map(int, FLAGS.dec_arch.split(',')))
+	
+	if FLAGS.enc_arch == '':
+		FLAGS.enc_arch = []
+	else:
+		FLAGS.enc_arch = list(map(int, FLAGS.enc_arch.split(',')))
 
-    print('====> Epoch: {} Average loss: {:.4f}'.format(
-          epoch, train_loss / len(train_loader.dataset)))
-
-    
-def test(args, model, device, test_loader, validation=True):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for i, (data, _) in enumerate(test_loader):
-            data = data.to(device)
-            recon_batch, mu, logvar = model(data)
-            test_loss += loss_function(recon_batch, data, mu, logvar).item()
-            if i == 0:
-                n = min(data.size(0), 8)
-                comparison = torch.cat([data[:n],
-                                      recon_batch.view(args.test_batch_size, 1, 28, 28)[:n]])
-                save_image(comparison.cpu(),
-                         os.path.join(resdir, 'reconstruction_' + str(epoch) + '.png'), nrow=n)
-
-    test_loss /= len(test_loader.dataset)
-    print('====> Test set loss: {:.4f}'.format(test_loss))
-
-    return test_loss
-
+	return
 
 def main():
+	"""
+	Runs the ML loop. Preprocesses data, trains model, along with regular validation and testing.
+	"""	
+	
+	os.environ['CUDA_VISIBLE_DEVICES'] = str(FLAGS.gpu_id)
+	subpath = 'noise_' + str(FLAGS.noise_std) 
+	FLAGS.logdir = os.path.join(FLAGS.logdir, FLAGS.datasource, subpath, FLAGS.exp_id)
+	FLAGS.outdir = os.path.join(FLAGS.outdir, FLAGS.datasource, subpath, FLAGS.exp_id)
 
-    parser = argparse.ArgumentParser(description='PyTorch implementation of parametric t-sne')
-    
-    # training hyperparmeters
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='input batch size for training (default: 64)')
-    parser.add_argument('--test-batch-size', type=int, default=1000, 
-                        help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=10, 
-                        help='number of epochs to train (default: 10)')
-    parser.add_argument('--lr', type=float, default=0.001, 
-                        help='learning rate (default: 0.001)')
+	if FLAGS.transfer > 0:
+		if FLAGS.transfer == 2:
+			transfer_exp_id = str(int(int(FLAGS.exp_id)/10))
+		source = FLAGS.datasource.split("2")[0]
+		FLAGS.transfer_logdir = os.path.join(FLAGS.transfer_logdir, source, subpath, transfer_exp_id)
+		FLAGS.transfer_outdir = os.path.join(FLAGS.transfer_outdir, source, subpath, transfer_exp_id)
+	
+	if not os.path.exists(FLAGS.logdir):
+		os.makedirs(FLAGS.logdir)
+	if not os.path.exists(FLAGS.outdir):
+		os.makedirs(FLAGS.outdir)
 
-    # system parameters
-    parser.add_argument('--seed', type=int, default=1,
-                        help='random seed (default: 1)')
-    parser.add_argument('--no-cuda', action='store_true', default=False,
-                        help='disables CUDA training')
-    parser.add_argument('--train', dest='train', action='store_true', default=False,
-                        help='trains a model from scratch if true')
+	import json
+	with open(os.path.join(FLAGS.outdir, 'config.json'), 'w') as fp:
+	    json.dump(tf.app.flags.FLAGS.flag_values_dict(), fp, indent=4, separators=(',', ': '))
 
-    # file handling parameters
-    parser.add_argument('--dataset', type=str, default='mnist',
-                        help='name of dataset')
-    parser.add_argument('--logdir', type=str, default='./logs',
-                        help='log directory')
-    parser.add_argument('--exp-id', type=str, default='1')
-    parser.add_argument('--datadir', type=str, default='../datasets')
-    parser.add_argument('--log-interval', type=int, default=100,
-                        help='how many batches to wait before logging training status')
+	if FLAGS.dump:
+		import sys
+		sys.stdout = open(os.path.join(FLAGS.outdir, 'log.txt'), 'w')
 
-    # ablation parameters
-    parser.add_argument('--loss', type=str, default='uae',
-                        help='Options: ae/uae/vae/dae/wae/bvae')
-    parser.add_argument('--zdim', type=int, default=50,
-                        help='number of latent dimensions')
-    parser.add_argument('--sigma', type=float, default=0.01, 
-                        help='Noise/bandwidth hyperparameter for uae/wvae/dae')
-    parser.add_argument('--beta', type=float, default=1.5,
-                        help='beta hyperparameter for bvae')
-    parser.add_argument('--linear', dest='train', action='store_true', default=False,
-                        help='uses linear encoder if true')
+	process_flags()
+	gpu_options = tf.GPUOptions(allow_growth=True)
+	sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options, allow_soft_placement=True))
+	
+	datasource = Datasource(sess)
+	model_class = load_dynamic(FLAGS.model.upper(), FLAGS.model)
+	model = model_class(sess, datasource, vae=FLAGS.vae)
 
-    args = parser.parse_args()
-    args.datadir = os.path.join(args.datadir, args.dataset)
-    exp_logdir = os.path.join(args.logdir, args.dataset, args.exp_id)
-    resdir = os.path.join(exp_logdir, 'results')
-    ckptdir = os.path.join(exp_logdir, 'ckpts')
+	# run computational graph
+	best_ckpt = None
+	if FLAGS.train:
+		learning_curves, best_ckpt = model.train()
+	
+	if FLAGS.test:
+		if best_ckpt is None:
+			log_file = os.path.join(FLAGS.outdir, 'log.txt')
+			if os.path.exists(log_file):
+				for line in open(log_file):
+					if "Restoring ckpt at epoch" in line:
+						best_ckpt = line.split()[-1]
+						break
+		model.test(ckpt=best_ckpt)
+		model.reconstruct(ckpt=best_ckpt, pkl_file=FLAGS.pkl_file)
 
-    if not os.path.exists(exp_logdir):
-        os.makedirs(exp_logdir)
-    if not os.path.exists(ckptdir):
-        os.makedirs(ckptdir)
-    if not os.path.exists(resdir):
-        os.makedirs(resdir)
-
-    torch.manual_seed(args.seed)
-    use_cuda = not args.no_cuda and torch.cuda.is_available()
-    device = torch.device('cuda' if use_cuda else 'cpu')
-    kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
-
-    train_loader, valid_loader, test_loader = get_loaders(dataset=args.dataset,
-                                            datadir=args.datadir,
-                                            batch_size=args.batch_size,
-                                            test_batch_size=args.test_batch_size,
-                                            kwargs=kwargs)
-
-    if args.dataset == 'mnist':
-        nin = 784
-    else:
-        raise NotImplementedError
-
-    enc_nout = zdim
-    if args.loss == 'vae' or args.loss == 'bvae':
-        enc_nout = 2*zdim 
-
-    enc_module = LinearEncoder if args.linear else NonLinearEncoder
-    encode = enc_module(nin=nin, nout=enc_nout)
-    decode = Decoder(nin=zdim, nout=nin)
-
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
-    savefile = os.path.join(ckptdir, 'best.pt')
-
-    if args.train:
-        for epoch in range(1, args.epochs + 1):
-            train(args, model, device, train_loader, optimizer, epoch, P)
-            # test(args, model, device, test_loader)
-            torch.save(model.state_dict(), savefile)
-    state_dict = torch.load(savefile)
-    model.load_state_dict(state_dict)
-
-if __name__ == '__main__':
-    main()
-
+if __name__ == "__main__":
+	main()
 
