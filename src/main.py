@@ -10,14 +10,13 @@ from tensorflow.python.platform import flags
 FLAGS = flags.FLAGS
 
 # File options
-flags.DEFINE_string('datadir', '../datasets/', 'directory for datasets')
+flags.DEFINE_string('datadir', './datasets/', 'directory for datasets')
 flags.DEFINE_string('datasource', 'mnist', 'mnist/omniglot/mnist2omniglot/omniglot2mnist')
 flags.DEFINE_string('logdir', './models/', 'directory to save checkpoints, events files')
 flags.DEFINE_string('outdir', './results/', 'directory to save samples, final results')
 flags.DEFINE_bool('resume', False, 'resume training if there is a model available')
 flags.DEFINE_bool('train', True, 'True to train.')
 flags.DEFINE_bool('test', True, 'True to test.')
-flags.DEFINE_bool('is_discrete', False, 'True if dataset is discrete, false otherwise.')
 flags.DEFINE_string('ckpt', None, 'ckpt to load if resume is True. Defaults (None) to latest ckpt in logdir')
 flags.DEFINE_string('exp_id', '0', 'exp_id appended to logdir and outdir')
 flags.DEFINE_string('gpu_id', '0', 'gpu id options')
